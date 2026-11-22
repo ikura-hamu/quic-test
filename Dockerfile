@@ -3,7 +3,7 @@ FROM debian:bookworm-slim AS build
 ARG TARGETARCH
 ARG MSQUIC_VERSION=2.6.4
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates cmake curl g++ libnuma1 libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates cmake curl g++ libnuma1 libssl3 make \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=secret,id=build_ca_bundle \
     set -eux; \
