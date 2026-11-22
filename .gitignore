@@ -1,0 +1,5 @@
+/build/
+/certs/*
+!/certs/generate.sh
+*.key
+*.pem
