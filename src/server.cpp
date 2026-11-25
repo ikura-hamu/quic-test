@@ -7,7 +7,9 @@
 #include <memory>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/signalfd.h>
+#include <system_error>
 #include <unistd.h>
 #include <vector>
 
@@ -160,15 +162,67 @@ QUIC_STATUS QUIC_API listenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT*
     return status;
 }
 
-void runQuic(uint16_t port, const sigset_t& signals) {
-    std::printf("[INFO] QUIC server starting instance=%s\n", env("HOSTNAME", "unknown"));
-    QUIC_CERTIFICATE_FILE files{env("QUIC_KEY", "/certs/server.key"),
-                                env("QUIC_CERT", "/certs/server.crt")};
+class InMemoryPem {
+public:
+    explicit InMemoryPem(const char* name) : fd_(memfd_create(name, MFD_CLOEXEC)) {
+        if (fd_ < 0) {
+            throw std::system_error(errno, std::generic_category(), "Create in-memory TLS file");
+        }
+    }
+
+    InMemoryPem(const InMemoryPem&) = delete;
+    InMemoryPem& operator=(const InMemoryPem&) = delete;
+    ~InMemoryPem() { close(fd_); }
+
+    std::string writePem(std::string_view pem) const {
+        while (!pem.empty()) {
+            const auto written = write(fd_, pem.data(), pem.size());
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                throw std::system_error(written < 0 ? errno : EIO, std::generic_category(),
+                                        "Write in-memory TLS file");
+            }
+            pem.remove_prefix(static_cast<size_t>(written));
+        }
+        return "/proc/self/fd/" + std::to_string(fd_);
+    }
+
+private:
+    int fd_;
+};
+
+void openServerCredentials(Quic& quic, const char* keyPath, const char* certPath) {
+    QUIC_CERTIFICATE_FILE files{keyPath, certPath};
     QUIC_CREDENTIAL_CONFIG credentials{};
     credentials.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     credentials.CertificateFile = &files;
+    quic.open(credentials, true);
+}
+
+void configureServer(Quic& quic) {
+    const char* cert = std::getenv("QUIC_CERT_PEM");
+    const char* key = std::getenv("QUIC_KEY_PEM");
+    if (!cert && !key) {
+        openServerCredentials(quic, env("QUIC_KEY", "/certs/server.key"),
+                              env("QUIC_CERT", "/certs/server.crt"));
+        return;
+    }
+    if (!cert || !*cert || !key || !*key) {
+        throw std::runtime_error("QUIC_CERT_PEM and QUIC_KEY_PEM must both be non-empty");
+    }
+
+    const InMemoryPem certFile("quic-cert");
+    const InMemoryPem keyFile("quic-key");
+    const auto certPath = certFile.writePem(cert);
+    const auto keyPath = keyFile.writePem(key);
+    // MsQuic loads the credentials synchronously, so these descriptors can close on return.
+    openServerCredentials(quic, keyPath.c_str(), certPath.c_str());
+}
+
+void runQuic(uint16_t port, const sigset_t& signals) {
+    std::printf("[INFO] QUIC server starting instance=%s\n", env("HOSTNAME", "unknown"));
     Server server;
-    server.quic.open(credentials, true);
+    configureServer(server.quic);
 
     HQUIC listener = nullptr;
     check(server.quic.api->ListenerOpen(server.quic.registration, listenerCallback, &server,
@@ -235,8 +289,9 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::puts("Usage: quic-server [--udp-probe]\n"
-                  "Environment: QUIC_PORT (4433), QUIC_CERT (/certs/server.crt), "
-                  "QUIC_KEY (/certs/server.key)");
+                  "  QUIC_PORT (4433)\n"
+                  "  QUIC_CERT_PEM and QUIC_KEY_PEM (both set to multiline PEM)\n"
+                  "  File fallback: QUIC_CERT (/certs/server.crt), QUIC_KEY (/certs/server.key)");
         return 0;
     }
     try {
