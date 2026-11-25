@@ -162,6 +162,21 @@ QUIC_STATUS QUIC_API listenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT*
     return status;
 }
 
+std::string decodePem(std::string_view pem) {
+    std::string decoded;
+    decoded.reserve(pem.size());
+    for (size_t newline = pem.find("\\n"); newline != std::string_view::npos;
+         newline = pem.find("\\n")) {
+        auto line = pem.substr(0, newline);
+        if (line.ends_with("\\r")) line.remove_suffix(2);
+        decoded.append(line);
+        decoded.push_back('\n');
+        pem.remove_prefix(newline + 2);
+    }
+    decoded.append(pem);
+    return decoded;
+}
+
 class InMemoryPem {
 public:
     explicit InMemoryPem(const char* name) : fd_(memfd_create(name, MFD_CLOEXEC)) {
@@ -213,8 +228,8 @@ void configureServer(Quic& quic) {
 
     const InMemoryPem certFile("quic-cert");
     const InMemoryPem keyFile("quic-key");
-    const auto certPath = certFile.writePem(cert);
-    const auto keyPath = keyFile.writePem(key);
+    const auto certPath = certFile.writePem(decodePem(cert));
+    const auto keyPath = keyFile.writePem(decodePem(key));
     // MsQuic loads the credentials synchronously, so these descriptors can close on return.
     openServerCredentials(quic, keyPath.c_str(), certPath.c_str());
 }
@@ -290,7 +305,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::puts("Usage: quic-server [--udp-probe]\n"
                   "  QUIC_PORT (4433)\n"
-                  "  QUIC_CERT_PEM and QUIC_KEY_PEM (both set to multiline PEM)\n"
+                  "  QUIC_CERT_PEM and QUIC_KEY_PEM (PEM with newlines or literal \\n)\n"
                   "  File fallback: QUIC_CERT (/certs/server.crt), QUIC_KEY (/certs/server.key)");
         return 0;
     }
